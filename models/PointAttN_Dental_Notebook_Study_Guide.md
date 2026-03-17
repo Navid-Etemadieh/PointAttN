@@ -1,573 +1,918 @@
-# PointAttN Dental Notebook Study Guide
+# PointAttN Dental Notebook — Teacher-Style Study Guide
 
-> Target notebook: `models/PointAttN_Dental.ipynb`
->
-> This guide is based on the real notebook cells (in order), plus closely related local files that the notebook depends on (`utils/model_utils.py`, `utils/train_utils.py`, and the base model `models/PointAttN.py`).
+Target notebook: `models/PointAttN_Dental.ipynb`
 
----
-
-## 1. Notebook Overview
-
-`models/PointAttN_Dental.ipynb` is a **full pipeline notebook** that does much more than model training. It:
-
-1. Prepares Python/CUDA build dependencies.
-2. Builds native ops (`mm3d_pn2`) and Chamfer distance extensions.
-3. Writes new project files for an "exact-size" dental setup:
-   - `models/PointAttN_exact.py`
-   - `dataset_exact.py`
-   - `train_exact.py`
-   - `test_exact.py`
-   - `cfgs/PointAttN_exact.yaml`
-4. Trains and resumes training.
-5. Evaluates checkpoints.
-6. Produces prediction files and quantitative reports.
-7. Visualizes point clouds.
-
-So this notebook is a **combination of environment setup + code generation + training + testing + visualization + analysis/reporting**.
-
-Its main purpose is to adapt PointAttN to a dental pair dataset with exact output-size handling and practical memory controls.
+This guide is written as a **beginner-friendly, teacher-style reference**. It is based on reading the notebook cell-by-cell in execution order and checking closely related local files needed to understand the logic.
 
 ---
 
-## 2. High-Level Summary of the Notebook
+# 1. Notebook Overview
 
-Major stage flow:
+`models/PointAttN_Dental.ipynb` is a **full workflow notebook**, not only a model definition notebook.
 
-1. **Environment bootstrap cells (0–22)**: pip installs, PyTorch CUDA check/fix, compiler/CUDA toolchain checks, mm3d/chamfer patch-and-build logic.
-2. **Config cell (27)**: creates one dataclass `ExactCfg` that drives all later file writing/training behavior.
-3. **Dependency/import checks (28–29)**.
-4. **Code-generation stage (30–33)**: writes model/dataset/train/test exact variants to disk.
-5. **YAML creation (34)**.
-6. **Data sanity check (35)**.
-7. **Training patch & run (36–37)**: patches resume/checkpoint logic, then launches training.
-8. **Checkpoint selection and test run (38–40)**.
-9. **Visualization stage (41–42)**: single-case and bulk triplet plots.
-10. **Quantitative evaluation and report plotting (43–44)**.
+It does all of these:
 
-Data flow (core model path):
+1. Environment setup and package installation.
+2. CUDA/toolchain checks and native extension build preparation.
+3. Building required geometric ops (mm3d point ops and Chamfer distance).
+4. Creating new project files for the dental exact-size workflow (`PointAttN_exact.py`, `dataset_exact.py`, `train_exact.py`, `test_exact.py`, YAML config).
+5. Training / resume training logic.
+6. Testing and saving predictions.
+7. Visualization (single case + batch triplets).
+8. Quantitative evaluation and report generation.
 
-`partial (N,3)` -> transpose to `[B,3,N]` -> encoder/coarse generation -> two refinement stages -> exact-size tail -> final exact cloud -> Chamfer-based losses/metrics.
+So its role in the full pipeline is:
+- **infrastructure + experiment authoring + training + evaluation + reporting**.
+
+It exists because dental scans can have very large point counts, and the notebook introduces practical controls (for example point caps and sampled Chamfer evaluation) to make training feasible while still producing exact-size outputs.
 
 ---
 
-## 3. Imports and Dependencies
+# 2. High-Level Summary of the Notebook
 
-### PyTorch-related imports
-- `torch`, `torch.nn`, `torch.nn.functional`, `torch.optim`.
-- Data loading: `torch.utils.data.DataLoader`.
-- Multihead attention and conv blocks in model code.
+## Major sections
 
-### NumPy / plotting / utility imports
-- `numpy`, `matplotlib`, `pandas`, `yaml`, `munch`, `pathlib`, `subprocess`, `re`, `shutil`, `time`.
-- Visualization: `matplotlib` + optional `open3d`.
+- **Cells 0–22**: Build/runtime environment preparation.
+- **Cell 27**: Central configuration (`ExactCfg`).
+- **Cells 28–29**: Dependency checks.
+- **Cells 30–33**: Writes core exact-pipeline files.
+- **Cell 34**: Writes YAML config.
+- **Cell 35**: Dataset shape sanity check.
+- **Cells 36–37**: Resume patch + training run.
+- **Cells 38–40**: Pick checkpoint + run testing + inspect outputs.
+- **Cells 41–42**: Qualitative visualization.
+- **Cells 43–44**: Quantitative evaluation and report plotting.
+- **Cells 45–46**: empty.
 
-### Local-project imports used by the generated code
+## Overall data flow
+
+`dataset file pair -> partial/gt tensors -> transpose to model layout -> encoder -> coarse -> refine -> refine -> exact tail -> output cloud -> Chamfer-based losses/metrics -> save outputs/reports`
+
+## Major stages of computation
+
+1. Build needed low-level operators.
+2. Define parameters and exact-size model behavior.
+3. Build dataset loader and model code.
+4. Run training and validation.
+5. Run test and save predicted point clouds.
+6. Visualize and quantify results.
+
+---
+
+# 3. Imports and Dependencies
+
+## Important import families and usage
+
+### PyTorch imports
+- `torch`, `torch.nn`, `torch.nn.functional`, `torch.optim`
+- Used for model modules, attention, loss backprop, optimizer, dataloading.
+
+### NumPy / plotting / utilities
+- `numpy`, `pandas`, `matplotlib`
+- `yaml`, `munch`, `pathlib`, `subprocess`, `re`, `shutil`, `time`
+- Used for config IO, parsing logs, plotting, and shell orchestration.
+
+### Project-local imports
 - `from utils.mm3d_pn2 import furthest_point_sample, gather_points`
 - `from utils.model_utils import calc_cd`
 - `from utils.train_utils import AverageValueMeter, save_model`
 
-### Closely related files you should inspect next
-1. `models/PointAttN.py` (base PointAttN architecture).
-2. `utils/model_utils.py` (Chamfer loss wrapper and `calc_cd`).
-3. `utils/train_utils.py` (meters + checkpoint save helper).
-4. `train.py` (base training style used by project).
-5. `cfgs/PointAttN.yaml` (baseline config style for non-exact run).
+These are critical. If they fail, core method cannot run.
+
+## Which local files you should inspect next
+
+1. `models/PointAttN.py` (baseline PointAttN design).
+2. `utils/model_utils.py` (Chamfer calculation wrapper).
+3. `utils/train_utils.py` (meters and checkpoint saving).
+4. `train.py` (original project training style).
+5. `dataset.py` (base dataset conventions).
 
 ---
 
-## 4. Cell-by-Cell Annotation
+# 4. Cell-by-Cell Annotation
 
-> Note: Notebook has almost all **code cells** and essentially no markdown explanations.
+> Note: The notebook has almost only code cells. There are no rich markdown explanation cells, so state is carried mainly through Python variables.
 
-### Cells 0–3: Python/PyTorch package setup
-- **Purpose**: install requirements safely for Python 3.12 + CUDA PyTorch.
-- **Key ideas**:
-  - Rewrite/skip problematic requirement pins.
-  - Explicitly install CUDA-enabled torch wheels (`2.5.1+cu124`).
-- **Outputs**: prepared package environment.
-- **Why it matters**: all native point cloud ops depend on compatible torch/CUDA toolchain.
+## Cells 0–3: Base package installation and CUDA torch setup
+- **Purpose**: install compatible dependencies and force CUDA-enabled torch.
+- **Code snippet**:
+```python
+run([PY, "-m", "pip", "install", "-U", "pip", "setuptools", "wheel", "ninja", "pybind11", "packaging"])
+...
+run_py_cmd([
+    sys.executable, "-m", "pip", "install", "-U",
+    "torch==2.5.1+cu124",
+    "torchvision==0.20.1+cu124",
+    "torchaudio==2.5.1+cu124",
+    "--index-url", "https://download.pytorch.org/whl/cu124"
+])
+```
+- **Detailed explanation**: these cells aggressively normalize environment assumptions so later C++/CUDA extension compilation matches PyTorch ABI.
+- **Inputs used**: current Python env, requirements file path.
+- **Outputs produced**: installed packages and CUDA torch.
+- **Why this matters**: all geometry kernels depend on this consistency.
 
-### Cells 4–6: Repo/tooling/log helpers
-- **Purpose**: find repo root, define logging helper, run env checks, install build tools.
-- **Important variables**: `REPO_ROOT`, `MM3D`, `OPS`, `LOG_DIR`.
-- **Outputs**: repeatable shell logging and diagnostics.
+## Cells 4–6: Repo discovery and reusable shell logging helpers
+- **Purpose**: define utility functions and locate repo paths.
+- **Snippet**:
+```python
+def run_bash_to_log(script: str, log_path: Path, ...): ...
+REPO_ROOT = find_repo_root(Path.cwd())
+MM3D = (REPO_ROOT / "utils" / "mm3d_pn2").resolve()
+OPS = MM3D / "ops"
+LOG_DIR = ensure_dir(REPO_ROOT / "_build_logs")
+```
+- **State created**: `REPO_ROOT`, `MM3D`, `OPS`, `LOG_DIR` used by many later cells.
 
-### Cells 7–13: mm3d_pn2 build workflow
-- **Purpose**:
-  - Set `CC/CXX` to GNU compilers.
-  - Find matching CUDA toolkit/nvcc.
-  - Patch legacy source includes (`THC` remnants, deprecated CUDA checks).
-  - Create local `mmcv` stub (`mmcv/utils/ext_loader.py`) for wrapper compatibility.
-  - Build mm3d extensions and test imports.
-- **Why it matters**: `furthest_point_sample` and `gather_points` are used everywhere in model/loss logic.
+## Cells 7–13: mm3d point op compatibility patch/build
+- **Purpose**: prepare and compile FPS/gather ops.
+- **Snippet**:
+```python
+PATCHES = [
+  (re.compile(r'^\s*#\s*include\s*<\s*THC/THC\.h\s*>\s*$', re.M), ""),
+  (re.compile(r'(\b\w+\b)\.type\(\)\.is_cuda\(\)'), r"\1.is_cuda()"),
+]
+...
+python setup.py build_ext --inplace
+```
+- **Explanation**: removes old THC-era code patterns and builds shared objects.
+- **Why matters**: model uses `furthest_point_sample` and `gather_points` everywhere.
 
-### Cells 14–22: ChamferDistance workflow
-- **Purpose**:
-  - Clone chamfer repo.
-  - Patch old CUDA / Python 3.12 issues.
-  - Ensure `nvcc` availability.
-  - Build extension and run import checks.
-  - Optional shim for `chamfer_dist.chamfer` compatibility.
-- **Why it matters**: `calc_cd` relies on chamfer extension.
+## Cells 14–22: ChamferDistance clone/patch/build
+- **Purpose**: ensure Chamfer extension works with current Python/CUDA toolchain.
+- **Snippet**:
+```python
+git clone https://github.com/ThibaultGROUEIX/ChamferDistancePytorch.git
+...
+python setup.py build_ext --inplace
+```
+- **State used later**: Chamfer import path used by `utils/model_utils.py`.
 
-### Cells 23–26: Empty placeholders
-- No logic.
+## Cells 23–26: Empty
+- No operation.
 
-### Cell 27: Master config dataclass
-- Defines `ExactCfg` with all knobs (data paths, model parameters, training settings, exact-tail controls, loss weights).
-- Establishes `CFG`, `REPO_ROOT`, `DATA_ROOT`, `CFG_PATH`.
+## Cell 27: Global experiment config (`ExactCfg`)
+- **Purpose**: define all path/data/model/train/eval controls in one dataclass.
+- **Important variables**:
+  - `max_encoder_points`, `exact_cd_points`, `metric_cd_points`
+  - `step1`, `step2`, `encoder_coarse_points`
+  - `exact_target_from`, `exact_target_points`
+- **Outputs**: `CFG`, `REPO_ROOT`, `DATA_ROOT`, `CFG_PATH`.
 
-### Cell 28: Install common Python libraries
-- Installs `numpy/pandas/matplotlib/scipy/open3d/tqdm/h5py/PyYAML/munch/transforms3d`.
+## Cell 28: Install common runtime packages
+- **Purpose**: install scientific and IO libraries.
 
-### Cell 29: Import checks for local ops
-- Confirms `mm3d_pn2` and (optionally) chamfer import success.
+## Cell 29: Import check for critical custom ops
+- **Purpose**: quick fail-fast check before writing/starting model code.
 
-### Cell 30: Write `models/PointAttN_exact.py`
-- **Most important architecture cell**.
-- Writes full model code string to disk.
-- Adds exact-size handling and encoder input capping while preserving PointAttN style.
+## Cell 30: Write exact model file (`models/PointAttN_exact.py`)
+- **Purpose**: define architecture used in this notebook run.
+- **Key blocks created**:
+  - `fps_bcn`, `fps_bnc`
+  - `cross_transformer`
+  - `PCT_encoderExact`
+  - `PCT_refine`
+  - `ExactSizeHead`
+  - top-level `Model`
+- **Connection**: later `train_exact.py` imports this model via `args.model_name`.
 
-Snippet (core forward):
+## Cell 31: Write exact dataset file (`dataset_exact.py`)
+- **Purpose**: dental pair dataset loader with normalization and optional augmentation.
+
+## Cell 32: Write train script (`train_exact.py`)
+- **Purpose**: training loop + validation + checkpoint save.
+
+## Cell 33: Write test script (`test_exact.py`)
+- **Purpose**: inference/evaluation and optional export of predicted clouds.
+
+## Cell 34: Write YAML config (`cfgs/PointAttN_exact.yaml`)
+- **Purpose**: serialize `CFG` dataclass values for scripts.
+
+## Cell 35: Dataset smoke test
+- **Purpose**: check one sample shape/dtype before expensive training.
+
+## Cell 36: Patch train script for full resume checkpoints
+- **Purpose**: add optimizer/epoch/lr/best-metric resume state.
+- **Important**: this cell modifies behavior of `train_exact.py` created in cell 32.
+
+## Cell 37: Auto-resume and launch training
+- **Purpose**: infer resume epoch from log, update YAML, start training.
+
+## Cell 38: Select checkpoint for testing
+- **Purpose**: choose `best_cd_p_network.pth` or fallback `network.pth` and update YAML.
+
+## Cell 39: Launch test script
+- **Purpose**: run `test_exact.py` with selected checkpoint.
+
+## Cell 40: Inspect test output folder
+- **Purpose**: verify prediction files exist in `<ckpt_dir>/all`.
+
+## Cell 41: Single sample qualitative visualization
+- **Purpose**: load one item, run model, plot partial/pred/GT.
+
+## Cell 42: Batch triplet visualization export
+- **Purpose**: save many side-by-side plots for dataset items.
+
+## Cell 43: Quantitative evaluation writer
+- **Purpose**: compute per-case and overall metrics and write text report.
+
+## Cell 44: Parse quant report and generate CSV/figures
+- **Purpose**: convert text report to tables/plots for quick analysis.
+
+## Cells 45–46
+- Empty.
+
+---
+
+# 5. Full Line-by-Line Explanation (important blocks)
+
+## 5.1 Model forward block (Cell 30 generated `Model.forward`)
 
 ```python
 x_raw = x
 x_enc = self._maybe_cap_encoder_input(x_raw)
+
 feat_g, coarse = self.encoder(x_enc)
-seed_source = torch.cat([x_raw, coarse], dim=2)
+
+if self.use_input_for_seed_sampling:
+    seed_source = torch.cat([x_raw, coarse], dim=2)
+else:
+    seed_source = torch.cat([x_enc, coarse], dim=2)
+
 seed = fps_bcn(seed_source, min(self.base_seed_points, seed_source.shape[-1]))
+
 fine, feat_fine = self.refine(None, seed, feat_g)
 fine1, feat_fine1 = self.refine1(feat_fine, fine, feat_g)
+
+target_points = self._resolve_target_points(x_raw, gt)
 exact = self.exact_head(fine1, feat_g, target_points)
 ```
 
-### Cell 31: Write `dataset_exact.py`
-- Defines dental pair dataset with strict `.npy` pairing and optional normalization/augmentation.
-- Returns tuple `(label, partial, gt, stem)`.
+Line-by-line notes:
+- `x_raw = x`: keep original full input for possible later use.
+- `_maybe_cap_encoder_input`: optionally FPS-reduce points to control memory.
+- `self.encoder(x_enc)`: generate global feature (`feat_g`) and coarse output.
+- `seed_source` concat on point axis: combines observed partial and coarse estimate.
+- `fps_bcn(...)`: selects seed points with good spatial coverage.
+- `refine` then `refine1`: two-stage coarse-to-fine refinement.
+- `_resolve_target_points`: decides exact final point count source (`gt`, `input`, or config).
+- `exact_head`: forces exact final output point count.
 
-### Cell 32: Write `train_exact.py`
-- Defines full training+validation loop for exact model.
-- Uses train/val datasets, logs metrics, saves checkpoints.
+Shape meaning:
+- input expected `[B,3,N]`.
+- outputs later converted to `[B,N,3]` for Chamfer and saving.
 
-### Cell 33: Write `test_exact.py`
-- Loads checkpoint, runs inference on test split, computes metrics, saves outputs (`.npy`/`.ply`).
-
-### Cell 34: Write `cfgs/PointAttN_exact.yaml`
-- Serializes `CFG` values to YAML consumed by train/test scripts.
-
-### Cell 35: Dataset smoke test
-- Instantiates dataset and prints first sample shapes/dtypes.
-
-### Cell 36: Patch `train_exact.py` for full resume
-- Adds helper functions to store/load full checkpoint state (epoch, optimizer, lr, best losses).
-- Rewrites parts of training script using regex patching.
-
-### Cell 37: Auto-resume launcher
-- Detects checkpoint + train log, infers resume epoch, updates YAML, runs `train_exact.py`.
-
-### Cells 38–40: Select checkpoint and run test
-- Picks best/fallback checkpoint.
-- Runs `test_exact.py`.
-- Checks saved output files under `.../all`.
-
-### Cell 41: One-sample visualization
-- Loads model + one test item.
-- Plots partial/prediction/GT point clouds.
-
-### Cell 42: Batch triplet visualization export
-- Loops over dataset indices and saves 3-panel PNGs for each case.
-
-### Cell 43: Quantitative evaluation writer
-- Re-runs model over split, records per-case and overview metrics to text file.
-
-### Cell 44: Quantitative report parser + plots
-- Parses `quant_eval_exact_*.txt`, builds dataframes, saves CSVs/figures.
-
-### Cells 45–46: Empty
-
----
-
-## 5. File-by-File Annotation for Related Dependencies
-
-### `utils/model_utils.py`
-- Provides `calc_cd(output, gt, calc_f1=False)`.
-- Uses compiled chamfer extension `dist_chamfer_3D`.
-- Returns `cd_p`, `cd_t` (and optionally f1).
-- This is the core distance/loss primitive for training and evaluation.
-
-### `utils/train_utils.py`
-- `AverageValueMeter` tracks average metrics.
-- `save_model` writes `net_state_dict` checkpoint.
-- Used by generated `train_exact.py` and `test_exact.py`.
-
-### `models/PointAttN.py`
-- Baseline PointAttN architecture.
-- Notebook’s generated `PointAttN_exact.py` is a modified derivative (same attention blocks + exact-size tail + configurable sampling logic).
-
----
-
-## 6. Function-by-Function Explanation (important ones)
-
-### `fps_bcn(points_bcn, npoints)`
-- **Input**: `[B,C,N]`.
-- **Output**: `[B,C,npoints]` (FPS sampled).
-- Uses `furthest_point_sample` + `gather_points`.
-
-### `fps_bnc(points_bnc, npoints)`
-- **Input**: `[B,N,C]`.
-- **Output**: `[B,npoints,C]`.
-- Same as above but different layout.
-
-### `cross_transformer.forward(src1, src2)`
-- Projects channels, permutes to seq-first for `MultiheadAttention`.
-- Performs cross-attention (`query=src1`, `key/value=src2`) + FFN + residual/norm.
-
-### `PCT_encoderExact.forward(points)`
-- Multi-stage FPS downsampling + attention aggregation.
-- Produces global feature `x_g` and coarse points.
-
-### `PCT_refine.forward(coarse, feat_g)`
-- Uses global context + attention blocks to upsample/refine point set by ratio.
-
-### `ExactSizeHead.forward(base_points_bcn, feat_g, target_points)`
-- Repeats base points to reach/exceed target size.
-- Learns residual offsets via shared 1D convs.
-- Trims exactly to target with FPS.
-
-### `Model.forward(x, gt, is_training)`
-- Runs encoder + two refiners + exact head.
-- If training: computes multi-stage Chamfer losses and weighted sum.
-- If eval: returns predictions and metrics dict.
-
-### Dataset functions (`dataset_exact.py`)
-- `load_points_any`, `normalize_pair`, `random_pair_transform`, `PairPointCloudDataset.__getitem__`.
-- Responsible for pair loading and optional transform/normalization.
-
----
-
-## 7. Class-by-Class Explanation
-
-### `cross_transformer`
-- Lightweight transformer block around `nn.MultiheadAttention`.
-- Exists to aggregate point features via attention.
-- Main params: `d_model`, `d_model_out`, `nhead`, `dim_feedforward`.
-
-### `PCT_encoderExact`
-- Encoder for extracting global feature + coarse seed cloud.
-- Keeps PointAttN logic close to original while making output coarse-size configurable.
-
-### `PCT_refine`
-- Refiner module; called twice with different `ratio` to perform staged upsampling.
-
-### `ExactSizeHead`
-- New notebook-specific class to produce exact point count requested by target/config/input.
-
-### `Model`
-- Top-level assembly: encoder + refiner1 + refiner2 + exact tail + loss/metric behavior.
-
-### `PairPointCloudDataset`
-- Dataset class reading paired partial/gt clouds from folder tree.
-
----
-
-## 8. End-to-End Execution Flow
-
-1. Set up Python/build toolchain.
-2. Validate CUDA and compiler compatibility.
-3. Build mm3d ops and Chamfer extensions.
-4. Define exact config object.
-5. Write model/dataset/train/test exact scripts.
-6. Write YAML config.
-7. Sanity-check dataset sample.
-8. Patch training script for robust resume.
-9. Train (or resume) model.
-10. Pick checkpoint.
-11. Run test script and save predictions.
-12. Plot single or many qualitative visualizations.
-13. Run quantitative evaluation and save per-case metrics.
-14. Parse metric files and export report CSV/plots.
-
----
-
-## 9. Inputs and Outputs of the Whole Notebook
-
-### Expected inputs
-- Dataset directory shaped like:
-
-```text
-root/
-  train/partial/*.npy
-  train/gt/*.npy
-  val/partial/*.npy
-  val/gt/*.npy
-  test/partial/*.npy
-  test/gt/*.npy
-```
-
-- Proper CUDA+compiler environment for extension compilation.
-
-### User-provided config values
-- Paths: `repo_root`, `data_root`.
-- Training: epochs, batch size, lr, optimizer.
-- Model controls: `max_encoder_points`, `base_seed_points`, `step1`, `step2`, exact-tail settings.
-
-### Outputs
-- Generated scripts (`*_exact.py`, YAML).
-- Trained checkpoints (`network.pth`, `best_*_network.pth`).
-- Test predictions in checkpoint folder `/all`.
-- Quant text file `quant_eval_exact_<split>.txt`.
-- Report CSVs + PNG figures.
-
----
-
-## 10. Tensor Shape Tracking (main path)
-
-Assume:
-- input partial in loader: `[B, N_partial, 3]`
-- after transpose for model: `[B, 3, N_partial]`
-
-Inside model:
-1. `x_enc = fps_bcn(x_raw, max_encoder_points)` -> `[B,3,N_enc]`.
-2. `feat_g, coarse = encoder(x_enc)` -> `feat_g ~ [B,512,1]`, `coarse ~ [B,3,N_coarse]`.
-3. seed source concat (`x_raw` + `coarse` along point dimension) -> `[B,3,N_partial+N_coarse]`.
-4. FPS seed -> `[B,3,base_seed_points]`.
-5. refine stage 1 (`ratio=step1`) -> `[B,3,base_seed_points*step1]`.
-6. refine stage 2 (`ratio=step2`) -> `[B,3,base_seed_points*step1*step2]`.
-7. exact head -> `[B,3,target_points]`.
-8. transpose for CD -> `[B,target_points,3]`.
-
-Why shapes change:
-- FPS changes number of points, keeps channels.
-- Concats on point axis increase N.
-- Refine uses repeat/reshape and residual conv to upsample points.
-- Exact head repeats then FPS-trims to exact required count.
-
----
-
-## 11. Attention Mechanism Explanation
-
-Implemented in `cross_transformer` (written in Cell 30; structurally same as `models/PointAttN.py`).
+## 5.2 Attention block line-by-line (`cross_transformer.forward`)
 
 ```python
 src1 = self.input_proj(src1)
 src2 = self.input_proj(src2)
+
+b, c, _ = src1.shape
 src1 = src1.reshape(b, c, -1).permute(2, 0, 1)
 src2 = src2.reshape(b, c, -1).permute(2, 0, 1)
+
+src1 = self.norm13(src1)
+src2 = self.norm13(src2)
+
 src12 = self.multihead_attn1(query=src1, key=src2, value=src2)[0]
 src1 = src1 + self.dropout12(src12)
 src1 = self.norm12(src1)
+
 src12 = self.linear12(self.dropout1(self.activation1(self.linear11(src1))))
 src1 = src1 + self.dropout13(src12)
 src1 = src1.permute(1, 2, 0)
 ```
 
-Simple math intuition:
-- Each query point in `src1` learns how much to attend to all points in `src2`.
-- Attention scores (inside `MultiheadAttention`) produce weighted combinations of `src2` features.
-- Residual + FFN improves expressive power while stabilizing training.
+Line-by-line purpose:
+- Project channel size to attention dimension.
+- Rearrange `[B,C,N] -> [N,B,C]` for `nn.MultiheadAttention`.
+- Normalize both token streams.
+- Cross-attention computes context-aware features for `src1` from `src2`.
+- Residual + norm maintains stable gradients.
+- FFN refines token features.
+- Convert back to model’s channel-first layout.
 
-Shape intuition:
-- Before attention: `[B,C,N]`.
-- For PyTorch MHA: `[N,B,C]`.
-- After attention and FFN: back to `[B,C,N]`.
+## 5.3 Loss block line-by-line (training branch)
+
+```python
+pred_exact_cd = self._maybe_sample_for_cd(exact_bnc, self.exact_cd_points)
+gt_exact_cd = gt
+if pred_exact_cd.shape[1] != gt.shape[1]:
+    gt_exact_cd = self._maybe_sample_for_cd(gt, pred_exact_cd.shape[1])
+
+loss_exact, _ = calc_cd(pred_exact_cd, gt_exact_cd)
+
+gt_fine1 = fps_bnc(gt, fine1_bnc.shape[1])
+loss_fine1, _ = calc_cd(fine1_bnc, gt_fine1)
+
+gt_fine = fps_bnc(gt_fine1, fine_bnc.shape[1])
+loss_fine, _ = calc_cd(fine_bnc, gt_fine)
+
+gt_coarse = fps_bnc(gt_fine, coarse_bnc.shape[1])
+loss_coarse, _ = calc_cd(coarse_bnc, gt_coarse)
+```
+
+Explanation:
+- `exact_cd_points` can downsample final cloud for feasible CD compute.
+- GT is size-matched when needed.
+- Intermediate outputs are supervised by FPS-aligned GT at each stage.
+- This is deep supervision from coarse to exact output.
+
+## 5.4 Dataset getitem block
+
+```python
+partial = load_points_any(partial_path)
+gt = load_points_any(gt_path)
+
+if self.normalize:
+    partial, gt = normalize_pair(partial, gt)
+
+if self.augment_train:
+    partial, gt = random_pair_transform(partial, gt)
+
+partial = torch.from_numpy(partial)
+gt = torch.from_numpy(gt)
+
+label = 0
+return label, partial, gt, stem
+```
+
+Explanation:
+- Loads paired clouds by stem.
+- Optional normalization and augmentation are applied to both clouds consistently.
+- Converts arrays to tensors, returns tuple consumed by DataLoader loops.
 
 ---
 
-## 12. Loss Function / Training Objective Explanation
+# 6. File-by-File Annotation for Related Dependencies
 
-Location:
-- Training loss built in generated model `Model.forward(..., is_training=True)`.
+## `utils/model_utils.py`
+- Why needed: defines Chamfer wrapper used by model loss and metrics.
+- Key function: `calc_cd(output, gt, calc_f1=False)`.
+- Connects to notebook: generated model imports it directly.
+
+## `utils/train_utils.py`
+- Why needed: helper meter and model-saving utilities.
+- Key functions/classes: `AverageValueMeter`, `save_model`.
+- Used by generated train/test scripts.
+
+## `models/PointAttN.py`
+- Why needed: baseline architecture pattern.
+- Notebook-generated `PointAttN_exact.py` preserves much of this design but adds exact-size output controls.
+
+## `dataset.py` and `train.py` (context files)
+- Why useful: show project-wide conventions and naming style.
+
+---
+
+# 7. Function-by-Function Explanation
+
+## In generated model (`PointAttN_exact.py`)
+
+### `fps_bcn(points_bcn, npoints)`
+- Input: `[B,C,N]`.
+- Output: `[B,C,npoints]`.
+- Purpose: FPS sampling in channel-first layout.
+
+### `fps_bnc(points_bnc, npoints)`
+- Input: `[B,N,C]`.
+- Output: `[B,npoints,C]`.
+- Purpose: FPS sampling in point-first layout.
+
+### `cross_transformer.forward(src1, src2, if_act=False)`
+- Purpose: cross/self attention feature update.
+- Output layout: `[B,C,N]`.
+
+### `PCT_encoderExact.forward(points)`
+- Purpose: extract global context + generate coarse cloud.
+- Key ops: staged FPS, gather, attention, global max pooling.
+
+### `PCT_refine.forward(x, coarse, feat_g)`
+- Purpose: upsample and refine point cloud by `ratio`.
+- Output: refined coordinates and intermediate features.
+
+### `ExactSizeHead.forward(base_points_bcn, feat_g, target_points)`
+- Purpose: enforce exact output point count.
+- Strategy: repeat -> residual correction -> FPS trim.
+
+### `Model.forward(x, gt=None, is_training=True)`
+- Training branch outputs: `(exact_bnc, loss_exact, total_train_loss)`.
+- Eval branch outputs: dict with outputs and CD metrics.
+
+## In generated dataset (`dataset_exact.py`)
+
+### `load_points_any(path)`
+- Loads `.npy` or `.ply`, returns float32 `(N,3)`.
+
+### `normalize_pair(partial, gt)`
+- Centers by GT centroid, scales by GT max radius.
+
+### `random_pair_transform(partial, gt)`
+- Applies shared geometric transform to both clouds.
+
+### `PairPointCloudDataset.__getitem__(index)`
+- Returns `(label, partial, gt, stem)`.
+
+## In `utils/model_utils.py`
+
+### `calc_cd(output, gt, calc_f1=False)`
+- Computes Chamfer-based metrics (`cd_p`, `cd_t` and optional `f1`).
+
+---
+
+# 8. Class-by-Class Explanation
+
+## `cross_transformer`
+- Exists to perform context aggregation through multi-head attention.
+- Internals: `input_proj`, `MultiheadAttention`, layer norms, FFN.
+- Used repeatedly in encoder and refiners.
+
+## `PCT_encoderExact`
+- Purpose: compress large point set into learned global/contextual representation and coarse cloud.
+- Why exists: initial feature extraction and geometric scaffold.
+
+## `PCT_refine`
+- Purpose: coarse-to-fine upsampling with attention-guided residual updates.
+- Called twice with different ratios.
+
+## `ExactSizeHead`
+- Purpose: final exact point count control.
+- Why exists: dental data can require very high and exact output sizes.
+
+## `Model`
+- Orchestrates all stages and computes training/evaluation outputs.
+
+## `PairPointCloudDataset`
+- Handles paired dental partial/GT reading, transforms, and output tuple.
+
+---
+
+# 9. End-to-End Execution Flow
+
+1. Install/verify packages and CUDA torch.
+2. Discover repo paths and create log helpers.
+3. Patch and build mm3d ops.
+4. Clone/patch/build Chamfer extension.
+5. Define `ExactCfg` experiment parameters.
+6. Write exact model/dataset/train/test scripts.
+7. Write YAML config.
+8. Run dataset smoke test.
+9. Patch train script for full resume checkpoint behavior.
+10. Launch training (new or resume).
+11. Select checkpoint.
+12. Run testing script.
+13. Verify prediction files.
+14. Generate qualitative plots.
+15. Generate quantitative metrics/report tables and figures.
+
+---
+
+# 10. Inputs and Outputs of the Whole Notebook
+
+## Expected inputs
+- Dataset root with:
+```text
+<root>/<split>/partial/*.npy
+<root>/<split>/gt/*.npy
+```
+for `split in {train,val,test}`.
+
+- Valid CUDA/toolchain environment for extension builds.
+- Correct path values in `ExactCfg` (`repo_root`, `data_root`).
+
+## User-provided configuration values
+- Data splits and normalization flags.
+- Model size controls (`max_encoder_points`, `base_seed_points`, `step1`, `step2`).
+- Training hyperparameters (lr, epochs, optimizer, workers).
+- Loss weights and CD sampling controls.
+- Save options (`save_vis`, `save_ext`).
+
+## Notebook outputs
+- Generated files: `models/PointAttN_exact.py`, `dataset_exact.py`, `train_exact.py`, `test_exact.py`, `cfgs/PointAttN_exact.yaml`.
+- Checkpoints in `log/<exp_name>/`.
+- Saved predictions in `<ckpt_dir>/all`.
+- Quantitative text reports and CSV/PNG charts.
+- Visualization PNGs for case triplets.
+
+---
+
+# 11. Tensor Shape Tracking
+
+Assume a batch from loader:
+- `partial`: `(B, Np, 3)`
+- `gt`: `(B, Ng, 3)`
+
+Model path:
+1. transpose for model:
+   - input `(B, Np, 3)` -> `(B, 3, Np)`
+2. optional cap:
+   - `(B, 3, Np)` -> `(B, 3, Nenc)` where `Nenc <= max_encoder_points`
+3. encoder outputs:
+   - `feat_g` roughly `(B, 512, 1)`
+   - `coarse` `(B, 3, Ncoarse)`
+4. seed source:
+   - concat point dimension `(B,3,Np+Ncoarse)`
+   - FPS seed `(B,3,Nseed)`
+5. refine 1:
+   - `(B,3,Nseed)` -> `(B,3,Nseed*step1)`
+6. refine 2:
+   - `(B,3,Nseed*step1)` -> `(B,3,Nseed*step1*step2)`
+7. exact head:
+   - -> `(B,3,Ntarget)`
+8. transpose for losses/metrics/saving:
+   - `(B,3,Ntarget)` -> `(B,Ntarget,3)`
+
+Attention block shape (inside transformer):
+- `[B,C,N] -> [N,B,C] -> [B,C,N]`.
+
+---
+
+# 12. Attention Mechanism Explanation
+
+## Where implemented
+- Notebook Cell 30 generated model code (`cross_transformer`).
+- Baseline reference structure also appears in `models/PointAttN.py`.
+
+## Attention code snippet
+
+```python
+src1 = self.input_proj(src1)
+src2 = self.input_proj(src2)
+
+b, c, _ = src1.shape
+src1 = src1.reshape(b, c, -1).permute(2, 0, 1)
+src2 = src2.reshape(b, c, -1).permute(2, 0, 1)
+
+src1 = self.norm13(src1)
+src2 = self.norm13(src2)
+
+src12 = self.multihead_attn1(query=src1, key=src2, value=src2)[0]
+src1 = src1 + self.dropout12(src12)
+src1 = self.norm12(src1)
+```
+
+## Careful explanation
+- Projection aligns channel dimensions for attention.
+- `query=src1`, `key=value=src2` means stream-1 gathers context from stream-2.
+- Residual keeps original information path.
+- Layer norm and FFN stabilize/strengthen token updates.
+
+## Math idea in simple words
+For each point token in `src1`, compute "how related" it is to each token in `src2`, use those relations as weights, and blend `src2` values into an updated representation for `src1`.
+
+---
+
+# 13. Loss Function / Training Objective Explanation
+
+## Where loss is calculated
+- In Cell 30 generated `Model.forward(..., is_training=True)`.
 - Distance primitive from `utils/model_utils.py::calc_cd`.
 
-Loss terms:
-1. `loss_coarse` between coarse output and FPS-downsampled GT.
-2. `loss_fine` between first refined output and aligned GT subset.
-3. `loss_fine1` between second refined output and aligned GT subset.
-4. `loss_exact` between final exact output and GT (optionally sampled by `exact_cd_points`).
+## Loss terms
+- `loss_coarse`: coarse output vs downsampled GT.
+- `loss_fine`: first refined output vs downsampled GT.
+- `loss_fine1`: second refined output vs downsampled GT.
+- `loss_exact`: final exact output vs GT (or sampled GT if CD sampling is active).
 
-Total:
+## Total loss
 
 ```python
 total_train_loss = (
-    w_coarse * loss_coarse.mean()
-    + w_fine * loss_fine.mean()
-    + w_fine1 * loss_fine1.mean()
-    + w_exact * loss_exact.mean()
+    self.w_coarse * loss_coarse.mean()
+    + self.w_fine * loss_fine.mean()
+    + self.w_fine1 * loss_fine1.mean()
+    + self.w_exact * loss_exact.mean()
 )
 ```
 
-Why this design:
-- Deep supervision at multiple resolutions encourages stable coarse-to-fine geometry learning.
-- Exact branch ensures final prediction is optimized for target resolution.
+This matches a coarse-to-fine supervision strategy: each stage is guided, not only the final stage.
+
+## Shapes in loss path
+- All CD calls expect point-first layout `(B, N, 3)`.
+- Therefore model outputs are transposed before CD.
 
 ---
 
-## 13. Other Important Methodology Blocks
+# 14. Other Important Methodology Blocks
 
-### Data preprocessing
-- `normalize_pair`: centers by GT centroid and scales by max GT radius.
-- Optional `random_pair_transform` for train augmentation.
+## Data preprocessing
+- Pair loading + optional normalize + optional augmentation.
 
-### Sampling/cropping
-- Extensive FPS usage to:
-  - cap encoder input size
-  - create seed sets
-  - align GT sizes for each loss stage
-  - cap metric/CD compute points for feasibility
+## Normalization
+- GT-centered and GT-scaled pair normalization.
 
-### Encoder logic
-- GDP-like staged downsampling + cross-attention blocks.
-- Global feature via adaptive max pooling.
+## Cropping / sampling
+- FPS used for:
+  - encoder capping,
+  - seed sampling,
+  - GT alignment for stage losses,
+  - optional CD metric sampling.
 
-### Decoder/refinement logic
-- Two sequential `PCT_refine` modules with configurable upsample ratios (`step1`, `step2`).
+## Feature extraction / encoder
+- Conv embedding + staged attention over downsampled sets.
 
-### Exact-size generation
-- `ExactSizeHead` repeats + residual adjusts + FPS trims.
+## Context aggregation
+- `feat_g` global latent from adaptive max pooling, reused in refinement/exact tail.
 
-### Evaluation/visualization
-- Metrics output in text + CSV + bar charts.
-- Triplet plots: partial, predicted, GT.
+## Decoder and upsampling
+- Two `PCT_refine` stages.
 
----
+## Coarse-to-fine generation
+- coarse -> fine -> fine1 -> exact.
 
-## 14. Important Calculations and Operations
+## Refinement
+- residual offsets added to repeated point sets.
 
-Common operations used heavily:
-- `transpose(2,1)` to switch `[B,N,3]` <-> `[B,3,N]` layouts.
-- `permute(2,0,1)` for attention API.
-- `reshape` after projection/refinement.
-- `torch.cat(..., dim=1 or 2)` for channel or point-dimension fusion.
-- `repeat` for upsampling points and broadcasting global feature.
-- FPS (`furthest_point_sample`) and indexed gather (`gather_points`).
-- `F.interpolate` to adapt coarse point count.
-- residual adds: `out + coarse.repeat(...)`.
+## Evaluation metrics
+- `cd_p`, `cd_t`, `cd_p_coarse`, `cd_t_coarse`.
+
+## Visualization
+- single-case interactive-like plot and bulk saved triplet figures.
 
 ---
 
-## 15. Parameter and Configuration Explanation (selected)
+# 15. Important Calculations and Operations
 
-- `max_encoder_points`: hard cap for encoder input points (memory/speed control).
-- `encoder_coarse_points`: coarse output size from encoder.
-- `base_seed_points`: seed count before refinement.
-- `step1`, `step2`: multiplicative upsampling ratios for two refine stages.
-- `exact_target_from`: source of target point count (`gt`, `input`, `config`).
-- `exact_cd_points`: optional FPS size for final-loss CD (feasibility).
-- `metric_cd_points`: optional FPS size for evaluation CD.
-- `merge_input_in_final`: optionally merge observed input into final output before FPS.
-- `w_coarse/w_fine/w_fine1/w_exact`: stage loss weights.
+Operations actually used in this notebook/workflow:
+- `transpose`, `permute`, `reshape`, `view`
+- `torch.cat`
+- `repeat`
+- FPS sampling and indexed gather
+- adaptive max pooling
+- interpolation (`F.interpolate`)
+- normalization by centroid/radius
+- Chamfer distance nearest-neighbor based computation
+- residual additions (`pred + repeated_base`)
 
-Changing these affects memory, runtime, output resolution, and optimization emphasis.
-
----
-
-## 16. How `models/PointAttN_Dental.ipynb` maps to the methodology
-
-- **Data preparation**: Cell 31 dataset class + normalization/augmentation.
-- **Feature extraction**: encoder conv + attention in generated model (Cell 30).
-- **Encoder logic**: staged FPS + cross-transformers.
-- **Attention mechanism**: `cross_transformer` (Cell 30 model code).
-- **Context aggregation**: global pooled feature `x_g` repeated into refiner/exact head.
-- **Decoder logic**: `PCT_refine` stages.
-- **Coarse-to-fine generation**: coarse -> fine -> fine1.
-- **Refinement**: second refine stage + exact tail residual prediction.
-- **Output generation**: exact point set `out2`.
-- **Loss computation**: multi-level Chamfer weighted sum.
-- **Metrics**: `cd_p`, `cd_t`, `cd_*_coarse` in eval path.
-- **Training logic**: generated `train_exact.py` + resume patch cells.
-- **Evaluation logic**: `test_exact.py`, quant-eval cell, report parser/plots.
+Why important: these operations define geometry flow and how point counts and feature channels change.
 
 ---
 
-## 17. Common Confusion Points
+# 16. Parameter and Configuration Explanation
 
-1. **Notebook writes code files dynamically** (Cell 30–33). If you inspect repository before running notebook, those files may not exist yet.
-2. **Same model style appears in `models/PointAttN.py` and generated exact file**; exact notebook variant adds target-size logic and sampling controls.
-3. **Shape layout flips** (`[B,N,3]` vs `[B,3,N]`) happen frequently.
-4. **Loss alignment uses FPS on GT**; GT is repeatedly re-sampled at each stage.
-5. **Several CUDA-fix cells overlap** (16,17,18) — they are alternatives, not all strictly required in every environment.
-6. **Cell 36 rewrites `train_exact.py` text with regex**, so behavior may differ depending on whether this patch ran.
+Key parameters from `ExactCfg` (Cell 27):
 
----
+- `max_encoder_points`:
+  - caps encoder input size.
+  - affects memory/runtime strongly.
 
-## 18. Simple Examples
+- `encoder_coarse_points`:
+  - coarse output points from encoder branch.
 
-- If `B=1`, `N_partial=164610`, `max_encoder_points=4096`:
-  - input to encoder becomes `[1,3,4096]` after FPS cap.
-- If `base_seed_points=512`, `step1=4`, `step2=8`:
-  - `fine` has `2048` points.
-  - `fine1` has `16384` points.
-- If GT has `164610` points and `exact_target_from='gt'`:
-  - exact head outputs `164610` points.
-  - if `exact_cd_points=16384`, CD is computed on FPS-subsets for feasibility.
+- `base_seed_points`:
+  - points sent to first refinement stage.
 
----
+- `step1`, `step2`:
+  - refinement upsampling multipliers.
 
-## 19. Summary of Full Execution Flow (short)
+- `exact_target_from` / `exact_target_points`:
+  - controls final output point count policy.
 
-1. Build environment and native ops.
-2. Define exact config.
-3. Write exact model/dataset/train/test scripts.
-4. Write YAML config.
-5. Check dataset sample.
-6. (Optionally) patch training script for full resume.
-7. Train or resume.
-8. Choose checkpoint and test.
-9. Visualize point clouds.
-10. Run quantitative evaluation and produce report artifacts.
+- `exact_cd_points`:
+  - training-time CD sampling size.
+
+- `metric_cd_points`:
+  - eval-time CD sampling size.
+
+- `merge_input_in_final`:
+  - optional merge of observed partial points in final output before FPS trim.
+
+- `w_coarse`, `w_fine`, `w_fine1`, `w_exact`:
+  - stage loss weights.
+
+- training settings (`lr`, `nepoch`, `optimizer`, `betas`, `batch_size`, `workers`):
+  - affect optimization behavior and speed.
 
 ---
 
-## 20. Study Notes
+# 17. How This Notebook Maps to the Methodology
 
-### 20 most important takeaways
-1. Notebook is end-to-end, not just training.
-2. It generates core scripts dynamically.
-3. Chamfer extension is mandatory for loss.
-4. mm3d ops are mandatory for FPS/gather.
-5. Data format is paired partial/gt `.npy`.
-6. Input/GT normalization is pair-based.
-7. Core attention block is `cross_transformer`.
-8. Encoder does staged FPS + attention.
-9. Decoder uses two refine stages.
-10. Exact-size tail is custom notebook addition.
-11. Point counts are controlled by many knobs.
-12. Training uses multi-stage deep supervision losses.
-13. Final loss can be subset-sampled for practicality.
-14. Eval metrics can also be subset-sampled.
-15. Resume behavior can be patched by Cell 36.
-16. Visualization pipeline exists both single-case and batch.
-17. Quant eval writes parsable text reports.
-18. Postprocessing cell creates CSV + figures.
-19. Many cells are environment-specific HPC fixes.
-20. Shape tracking is central to understanding correctness.
+## How `models/PointAttN_Dental.ipynb` maps to the methodology
 
-### 20 self-check study questions
-1. Why transpose to `[B,3,N]` before model forward?
-2. What does `max_encoder_points` protect against?
-3. How is FPS used differently in encoder vs loss alignment?
-4. What role does `feat_g` play in refinement?
-5. Why two refine stages?
-6. How does exact head reach arbitrary target size?
-7. Why trim with FPS after repeating points?
-8. What is difference between `cd_p` and `cd_t`?
-9. Why sample for CD using `exact_cd_points`?
-10. How does `metric_cd_points` differ from training CD sampling?
-11. What changes if `exact_target_from='input'`?
-12. What happens if `merge_input_in_final=True`?
-13. Why are best checkpoints saved per metric?
-14. How does val loop compute and compare best metrics?
-15. Where do prediction files get written?
-16. What assumptions does dataset pairing make about filenames?
-17. Why is a local `mmcv` stub created?
-18. Which cells are mandatory vs optional in your environment?
-19. How does Cell 36 alter checkpoint semantics?
-20. How close is exact model to base `PointAttN.py`?
+- **data preparation**: Cell 31 (`PairPointCloudDataset`, normalization, augmentation).
+- **feature extraction**: Cell 30 (`PCT_encoderExact` conv + attention stack).
+- **encoder logic**: staged FPS + gather + attention.
+- **attention mechanism**: `cross_transformer` class.
+- **context aggregation**: global pooled `feat_g`.
+- **decoder logic**: two `PCT_refine` modules.
+- **coarse-to-fine generation**: coarse -> fine -> fine1.
+- **refinement**: residual coordinate updates in refiners.
+- **output generation**: `ExactSizeHead` exact target point count.
+- **loss computation**: multi-stage Chamfer in training branch.
+- **metrics**: CD metrics in eval branch.
+- **training logic**: generated train script + patch + launch cells.
+- **evaluation logic**: generated test script + quant report cells.
 
-### Next 5 files to inspect and why
-1. `models/PointAttN.py` — baseline architecture to compare against exact variant.
-2. `utils/model_utils.py` — exact Chamfer computation definition.
-3. `utils/train_utils.py` — logging meters and checkpoint format.
-4. `train.py` — original project training conventions and argument flow.
-5. `dataset.py` — baseline dataset handling for context versus dental exact dataset.
+---
 
+# 18. Worked Example: One Input Passing Through the Notebook
+
+Let’s choose a realistic example based on configuration defaults:
+- `B = 1`
+- partial input points `Np = 164610` (large dental scan)
+- GT points `Ng = 164610`
+- `max_encoder_points = 4096`
+- `base_seed_points = 512`
+- `step1 = 4`, `step2 = 8`
+- `exact_target_from = 'gt'`
+
+## Stage-by-stage walk
+
+1. **Dataset output** from `PairPointCloudDataset`:
+   - `partial`: `(164610, 3)`
+   - `gt`: `(164610, 3)`
+
+2. **Batching** in DataLoader:
+   - `partial`: `(1, 164610, 3)`
+   - `gt`: `(1, 164610, 3)`
+
+3. **Transpose before model**:
+   - `x = partial.transpose(2,1)` -> `(1, 3, 164610)`
+
+4. **Encoder input cap**:
+   - `x_enc = fps_bcn(x, 4096)` -> `(1, 3, 4096)`
+
+5. **Encoder outputs**:
+   - `feat_g ~ (1, 512, 1)`
+   - `coarse ~ (1, 3, 256)` (using `encoder_coarse_points=256`)
+
+6. **Seed source and seed selection**:
+   - concat raw+coarse -> `(1, 3, 164866)`
+   - FPS seed to 512 -> `(1, 3, 512)`
+
+7. **Refine stage 1**:
+   - output `fine` -> `(1, 3, 2048)`
+
+8. **Refine stage 2**:
+   - output `fine1` -> `(1, 3, 16384)`
+
+9. **Exact head**:
+   - target points from GT: `164610`
+   - output `exact` -> `(1, 3, 164610)`
+
+10. **Training/eval layout for CD**:
+   - transpose `exact_bnc` -> `(1, 164610, 3)`
+
+What values mean:
+- Coordinates are normalized 3D positions in model coordinate space.
+- Later denormalization is not shown in this notebook; saved outputs are model-space predictions.
+
+---
+
+# 19. Exact Progress Values for the Worked Example
+
+## What can be exact from static code reading
+From static reading, we can give exact **shape progression** and exact formulas. That is done above.
+
+## About exact numeric intermediate tensor values
+To provide true numeric values, code execution is required. I attempted to run minimal Python checks in this environment, but runtime packages are missing here (no `torch`, no `numpy` available in the current shell environment at this moment).
+
+So in this section:
+- **real execution values**: not available in this environment now.
+- **illustrative exact-number mini-example**: provided below, hand-worked.
+
+## Illustrative example values (hand-worked)
+
+### A) Pair normalization mini-example (illustrative exact arithmetic)
+Take:
+- `gt = [[1,0,0],[0,1,0],[0,0,1]]`
+- `partial = [[2,0,0],[0,2,0],[0,0,2]]`
+
+1. GT centroid:
+   - `center = [1/3, 1/3, 1/3]`
+2. Centered GT first point:
+   - `[1,0,0] - center = [2/3, -1/3, -1/3]`
+3. Radius of that point:
+   - `sqrt((2/3)^2 + (-1/3)^2 + (-1/3)^2) = sqrt(6/9) = sqrt(2/3)`
+4. All 3 centered GT points have same norm, so `scale = sqrt(2/3)`.
+5. Normalized GT first point:
+   - `[2/3, -1/3, -1/3] / sqrt(2/3)`.
+
+This is exactly the code logic used in `normalize_pair`.
+
+### B) Tiny attention math mini-example (illustrative)
+Using simple matrices:
+- `Q = [[1,0],[0,1]]`
+- `K = [[1,1],[1,0]]`
+- `V = [[2,0],[0,2]]`
+
+1. Scores:
+- `S = QK^T / sqrt(2)`
+- `QK^T = [[1,1],[1,0]]`
+- `S = [[0.7071,0.7071],[0.7071,0.0000]]`
+
+2. Softmax row-wise:
+- row1 -> `[0.5,0.5]`
+- row2 -> `[0.6698,0.3302]`
+
+3. Output:
+- row1 = `0.5*[2,0] + 0.5*[0,2] = [1,1]`
+- row2 = `0.6698*[2,0] + 0.3302*[0,2] = [1.3396,0.6604]`
+
+These are illustrative values of the same attention principle used by `MultiheadAttention`.
+
+---
+
+# 20. Common Confusion Points
+
+## Confusion 1: “These files already exist in repo”
+Snippet:
+```python
+model_path = REPO_ROOT / "models" / "PointAttN_exact.py"
+model_path.write_text(model_code, encoding="utf-8")
+```
+Why confusing: file is created dynamically during notebook run.
+Correct view: notebook is also a code generator.
+
+## Confusion 2: Hidden state across cells
+- `REPO_ROOT`, `CFG`, `CFG_PATH`, `CHAMFER_DIR` are created earlier and reused later.
+- Running cells out of order can break logic.
+
+## Confusion 3: Shape layout flips
+- DataLoader gives `(B,N,3)` but model expects `(B,3,N)`.
+- Many bugs come from forgetting this transpose.
+
+## Confusion 4: Multiple CUDA-fix cells
+- Cells 16/17/18 are alternative repair pathways in different environments.
+
+## Confusion 5: Training script behavior may change after Cell 36
+- Cell 36 patches `train_exact.py` text, so later behavior differs from original generated version.
+
+## Confusion 6: CD can be sampled
+- `exact_cd_points` and `metric_cd_points` mean reported/training CD may be on FPS subsets, not always full clouds.
+
+---
+
+# 21. Summary of Full Execution Flow
+
+1. Prepare python/cuda/toolchain environment.
+2. Build mm3d ops and Chamfer distance extension.
+3. Define experiment configuration dataclass.
+4. Generate model/dataset/train/test exact files.
+5. Write YAML config.
+6. Validate sample data shapes.
+7. Patch and run training/resume.
+8. Select checkpoint and run test.
+9. Save/inspect predicted point clouds.
+10. Create visualization images.
+11. Compute quantitative metrics and export reports.
+
+---
+
+# 22. Study Notes
+
+## 20 most important things to learn
+1. The notebook is end-to-end, not only architecture.
+2. It dynamically writes core scripts.
+3. Native ops are mandatory (FPS/gather).
+4. Chamfer extension is mandatory for loss.
+5. Data is paired partial/GT by matching filename stems.
+6. Pair normalization is GT-centered and GT-scaled.
+7. Model input layout is channel-first `(B,3,N)`.
+8. Attention block is `cross_transformer`.
+9. Encoder alternates sampling and attention.
+10. Decoder has two refinement stages.
+11. Exact-size head enforces target point count.
+12. Loss uses deep supervision at multiple scales.
+13. GT is FPS-aligned per stage for loss.
+14. CD computation can be subset-sampled for feasibility.
+15. Resume logic is patched later in notebook.
+16. Evaluation exports both aggregate and per-case results.
+17. Visualization includes single-case and bulk modes.
+18. Many cells depend on earlier global variables.
+19. Empty cells exist and are safe to ignore.
+20. Cell order is essential for reproducibility.
+
+## 20 study questions
+1. Why does the notebook compile native code before model training?
+2. What breaks if CUDA toolkit version mismatches torch CUDA version?
+3. Which variables from Cell 27 control output size behavior?
+4. Why is `max_encoder_points` important for dental scans?
+5. What is the role of `feat_g` in refinement and exact tail?
+6. Why does refinement use residual addition?
+7. How does FPS differ from random sampling here?
+8. Why are there both `cd_p` and `cd_t`?
+9. Why supervise coarse and fine outputs, not only final output?
+10. How does `exact_target_from` change behavior?
+11. When would `merge_input_in_final=True` help or hurt?
+12. Why does the dataset enforce `.npy` pairing?
+13. Which cells must be rerun after changing `CFG`?
+14. What does Cell 36 add to checkpoint format?
+15. How are best checkpoints selected in validation?
+16. Where are predictions saved and how are they named?
+17. How does Cell 43 differ from `test_exact.py` summary logging?
+18. What operations change tensor shape but not semantic meaning?
+19. Which operations change geometric values directly?
+20. How would you verify whether CD is full-resolution or sampled?
+
+## Next 5 files to inspect and why
+1. `models/PointAttN.py` — baseline architecture to compare with exact variant.
+2. `utils/model_utils.py` — exact Chamfer metric/loss implementation.
+3. `utils/train_utils.py` — meter/checkpoint helpers used in train/test scripts.
+4. `train.py` — original training flow and conventions.
+5. `dataset.py` — baseline data pipeline for comparison with `dataset_exact.py`.
+
+---
+
+If you want, I can also produce a **“cell run order checklist”** version (short operational playbook) derived from this guide for practical notebook execution.
