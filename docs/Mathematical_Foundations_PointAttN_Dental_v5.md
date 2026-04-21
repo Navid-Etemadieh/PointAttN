@@ -34,7 +34,7 @@ Let the batch size be $B$.
 - $N_{f}=N_s r_1$: first refinement count.
 - $N_{f1}=N_s r_1 r_2$: second refinement count.
 - $N_t$: exact target output count chosen by `exact_target_from`.
-- $X^{(b)}=\{x_i\}_{i=1}^{N_{\text{in}}}$: input point set for batch item $b$.
+- $$X^{(b)}=\{x_i\}_{i=1}^{N_{\text{in}}}$$: input point set for batch item $b$.
 - $Y^{(b)}=\{y_j\}_{j=1}^{N_{\text{gt}}}$: ground-truth set.
 - $\hat{Y}_c,\hat{Y}_s,\hat{Y}_f,\hat{Y}_{f1},\hat{Y}_e$: coarse, seed, first refine, second refine, and exact outputs.
 - $G$: global encoder feature token.
