@@ -99,7 +99,7 @@ Role in the pipeline:
 - $\hat{Y}_e$: exact-size output.
 - $G$: global feature token.
 - $Q, K, V$: attention tensors.
-- $\mathcal{L}_c, \mathcal{L}_f, \mathcal{L}_{f1}, \mathcal{L}_e$: stage losses.
+- $L_c, L_f, L_{f1}, L_e$: stage losses.
 - $w_c, w_f, w_{f1}, w_e$: loss weights.
 - $\theta$: trainable parameters.
 
